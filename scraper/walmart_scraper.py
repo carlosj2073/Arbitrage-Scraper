@@ -47,7 +47,7 @@ class WalmartScraper:
 
                 results.append({
                     "listing" : listing,
-                    "price" : WalmartScraper.parse_price(price_raw),
+                    "price_usd" : WalmartScraper.parse_price(price_raw),
                     "url" : url,
                     "image" : image,
                     "brand" : None  

@@ -18,35 +18,47 @@ class Loader:
     def load_data(self, data: list[dict], website: str) -> None:
         cursor = self.db_connection.cursor()
 
-        source_name = website
-        cursor.execute("SELECT id FROM sources WHERE name = %s", (source_name,))
-        row = cursor.fetchone()
-        if row:
-            source_id = row[0]
+        if website == "google":
+            source_names = set(data['product_website'] for data in data)
         else:
-            cursor.execute("INSERT INTO sources (name) VALUES (%s)", (source_name,))
-            source_id = cursor.lastrowid
-        
+            source_names = {website}
+
+        source_ids = {}
+        for source_name in source_names:  
+            cursor.execute("SELECT id, name FROM sources WHERE name = %s", (source_name,))
+            row = cursor.fetchone()
+            if row:
+                source_ids[source_name] = row[0]
+            else:
+                cursor.execute("INSERT INTO sources (name) VALUES (%s)", (source_name,))
+                source_ids[source_name] = cursor.lastrowid
+
+            
         try:
             for item in data:
-                    
-                    # Inserts into product_listings table
-                    query = ("""
-                        INSERT INTO product_listings (product_id, source_id, listing, brand, website_pid, url, image)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE website_pid = VALUES(website_pid), url = VALUES(url)
-                    """)
-                    values = item['product_id'], source_id, item['listing'], item['brand'], item.get('website_pid'), item.get('url'), item['image']
-                    cursor.execute(query, values)
-                    product_listings_id = cursor.lastrowid
+                # Inserts into product_listings table
+                query = ("""
+                    INSERT INTO product_listings (product_id, source_id, listing, brand, website_pid, url, image)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE website_pid = VALUES(website_pid), url = VALUES(url)
+                """)
 
-                    # Inerts into price_scraped table
-                    query = ("""
-                        INSERT INTO price_scraped (product_listings_id, price_usd, scraped_at)
-                        VALUES (%s, %s, NOW())
-                    """)
-                    values = (product_listings_id, item['price_usd'])
-                    cursor.execute(query, values)
+                if website == "google":
+                    source_id = source_ids.get(item['product_website'])
+                else:
+                    source_id = source_ids.get(website)
+
+                values = item['product_id'], source_id, item['listing'], item['brand'], item.get('website_pid'), item.get('url'), item['image']
+                cursor.execute(query, values)
+                product_listings_id = cursor.lastrowid
+
+                # Inerts into price_scraped table
+                query = ("""
+                    INSERT INTO price_scraped (product_listings_id, price_usd, scraped_at)
+                    VALUES (%s, %s, NOW())
+                """)
+                values = (product_listings_id, item['price_usd'])
+                cursor.execute(query, values)
             self.db_connection.commit()
 
         except mysql.connector.Error as e:

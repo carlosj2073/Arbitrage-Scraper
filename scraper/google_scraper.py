@@ -64,7 +64,7 @@ class GoogleScraper:
                     seen_pids.add(website_pid)   
                     results.append({
                         "listing" : listing,
-                        "price" : GoogleScraper.parse_price(price_raw),
+                        "price_usd" : GoogleScraper.parse_price(price_raw),
                         "website_pid" : website_pid,    
                         "image" : image,
                         "brand" : None
