@@ -17,6 +17,7 @@ def get_logger(name: str) -> logging.Logger:
     )
     filehandler.setFormatter(formatter)
     
+    # add handler to logger if not exists
     if not logger.hasHandlers():
         logger.addHandler(filehandler)
 
