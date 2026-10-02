@@ -1,7 +1,7 @@
 [project]
 name = "arbitrage-pipeline"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-source retail price arbitrage pipeline"
 requires-python = ">=3.11"
 dependencies = [
     "playwright>=1.60.0",
@@ -13,3 +13,10 @@ dev = [
     "mypy>=2.3.1",
     "ruff>=0.16.6",
 ]
+
+[tool.mypy]
+python_version = "3.11"
+
+[[tool.mypy.overrides]]
+module = "playwright_stealth.*"
+ignore_missing_imports = true

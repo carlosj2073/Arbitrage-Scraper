@@ -1,68 +1,122 @@
 import logging
-from logger import get_logger
-from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth
-from decimal import Decimal
 import re
+import random
+from decimal import Decimal
+from types import TracebackType
+from typing import Self
+
+from logger import get_logger
+from playwright.sync_api import Browser, Page, Playwright, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright_stealth import Stealth
+
 
 class BestBuyScraper:
     website = "bestbuy"
+    MAX_LAUNCH_RETRIES = 3
 
-    def __init__(self, url: str, logger: logging.Logger) -> None:
+
+    def __init__(self, url: str, logger: logging.Logger, headless: bool = False) -> None:
         self.url = url
         self.logger = logger
-        self.playwright = None
-        self.browser = None
-        self.page = None
-    
-    def launch(self) -> None: 
+        self.headless = headless
+        self.playwright: Playwright | None = None
+        self.browser: Browser | None = None
+        self.page: Page | None = None
+
+    def __enter__(self) -> Self:
+        self.launch()
+        return self
+
+    def __exit__(
+        self,
+        exec_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if self.browser:
+            self.browser.close()
+        if self.playwright:
+            self.playwright.stop()           
+
+    def launch(self) -> None:
+        """Starts Playwright and navigates to url with retry logic on transient failures."""
         self.logger.info (f"Initiating playwright and launching {self.website}.com")
         self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=False)
-        self.page = self.browser.new_page()
-        Stealth().apply_stealth_sync(self.page)
-        self.page.goto(self.url)
-        
-        self.logger.info(f"Launched browser and navigated to {self.url}")
 
+        for attempt in range(1, self.MAX_LAUNCH_RETRIES + 1):
+            try:
+                self.browser = self.playwright.chromium.launch(headless=self.headless, timeout=30_000)
+                self.page = self.browser.new_page()
+                Stealth().apply_stealth_sync(self.page)
+                self.page.goto(self.url, timeout=30_000)
+                self.logger.info(f"Launched browser and navigated to {self.url}")
+                return
+            except PlaywrightTimeoutError as e:
+                self.logger.warning(f"Launch attempt {attempt} failed: {e}")
+                if self.browser:
+                    self.browser.close()
+                if attempt == self.MAX_LAUNCH_RETRIES:
+                    raise
+
+    def scroll(self) -> None:
+        """Scrolls down the page to product cards to combat lazy loading selectors."""
+        assert self.page is not None
+        previous_height = 0
+
+        for i in range(10): # range hard cap avoids inifinite scroll
+            scroll_amount = random.randint(300, 800)
+            self.page.mouse.wheel(0, scroll_amount)
+            self.page.wait_for_timeout(random.randint(1000, 3000))
+            current_height = self.page.evaluate("document.body.scrollHeight")
+            if current_height == previous_height:
+                break # stops scrolling at the bottom of the page
+            previous_height = current_height
+
+        self.logger.info(f"Scroll finished after {i+1} iterations. Final height: {current_height}")
+        
     def scrape(self) -> list[dict]:
+        """Scrapes product data from page per DOM product card at a time. """
+        assert self.page is not None
         results = []
         seen_pids = set() # used for deduplication step
 
         self.page.wait_for_selector('[data-product-id]')
+        self.scroll()
 
         cards = self.page.locator('[data-product-id]').all()
         self.logger.info(f"Found {len(cards)} product cards")
         
         for card in cards:
             try:
+                website_pid = card.get_attribute('data-product-id')
+                if website_pid in seen_pids:
+                    self.logger.warning(f"Skipping repeated card: website_pid = {website_pid}")
+                    continue
                 listing = card.locator('.product-title').inner_text()
                 price_raw = card.locator('[data-testid="price-block-customer-price"]').nth(0).inner_text() 
-                website_pid = card.get_attribute('data-product-id')
                 url = card.locator('.product-list-item-link').get_attribute('href')
                 image = card.locator(' [data-testid="product-image"]').get_attribute('src')
 
-                if website_pid not in seen_pids:
-                    seen_pids.add(website_pid)
-                    results.append({
-                        "listing" : listing,
-                        "price_usd" : BestBuyScraper.parse_price(price_raw),
-                        "website_pid" : website_pid,
-                        "url" : url,
-                        "image" : image,
-                        "brand" : None
+                seen_pids.add(website_pid)
+                results.append({
+                    "listing" : listing,
+                    "price_usd" : self.parse_price(price_raw),
+                    "website_pid" : website_pid,
+                    "url" : url,
+                    "image" : image,
+                    "brand" : None
 
-                    })
-                else:
-                    self.logger(f"skipping repeated card: listing={listing}, website_pid={website_pid}")
-                    continue
+                })
 
-            except Exception as e:
-                self.logger.warning(f"Skipping card due to error: {e}")
+            except Exception:
+                self.logger.exception("Skipping card due to error")
         return results
+
     
     @staticmethod
     def parse_price(price_raw: str) -> Decimal:
+        "formats and converts a price string to Decimal"
         match = re.search(r'\$([\d,]+\.\d{2})', price_raw)
         if not match:
             raise ValueError(f"No price found in: {price_raw}")
@@ -73,10 +127,10 @@ if __name__ == "__main__":
     url = "https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&st=headphones"
     logger = get_logger("bestbuy")
 
-    scraper = BestBuyScraper(url=url, logger=logger)
-    scraper.launch()
-    results = scraper.scrape()
+    with BestBuyScraper(url=url, logger=logger) as scraper:
+        results = scraper.scrape()
 
     for result in results:
-        print(result("listing", "price_usd", "website_pid", "url" , "brand"), "\n")
-                 
+        print(result)
+    
+    
