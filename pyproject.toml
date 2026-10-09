@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Multi-source retail price arbitrage pipeline"
 requires-python = ">=3.11"
 dependencies = [
+    "patchright>=1.63.0",
     "playwright>=1.60.0",
     "playwright-stealth>=2.0.3",
 ]

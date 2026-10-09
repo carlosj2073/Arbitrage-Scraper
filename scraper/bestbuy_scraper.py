@@ -1,14 +1,18 @@
 import logging
-import re
 import random
+import re
 from decimal import Decimal
 from types import TracebackType
-from typing import Self
+from typing import Literal, Self
 
-from logger import get_logger
-from playwright.sync_api import Browser, Page, Playwright, sync_playwright
+from patchright.sync_api import TimeoutError as PatchrightTimeoutError
+from patchright.sync_api import sync_playwright as patchright_sync_playwright
+from playwright.sync_api import Browser, Page, Playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright as stock_sync_playwright
 from playwright_stealth import Stealth
+
+from scraper.logger import get_logger
 
 
 class BestBuyScraper:
@@ -16,14 +20,15 @@ class BestBuyScraper:
     MAX_LAUNCH_RETRIES = 3
 
 
-    def __init__(self, url: str, logger: logging.Logger, headless: bool = False) -> None:
+    def __init__(self, url: str, logger: logging.Logger, setup: Literal["stock", "patchright"] = "stock", headless: bool = False) -> None:
         self.url = url
         self.logger = logger
+        self.setup = setup
         self.headless = headless
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None
         self.page: Page | None = None
-
+ 
     def __enter__(self) -> Self:
         self.launch()
         return self
@@ -42,17 +47,25 @@ class BestBuyScraper:
     def launch(self) -> None:
         """Starts Playwright and navigates to url with retry logic on transient failures."""
         self.logger.info (f"Initiating playwright and launching {self.website}.com")
-        self.playwright = sync_playwright().start()
+
+        # Determines the setup 
+        if self.setup == "stock" :
+            self.playwright = stock_sync_playwright().start()
+            timeout_error = PlaywrightTimeoutError
+        else:
+            self.playwright = patchright_sync_playwright().start()  # type: ignore[assignment]  # patchright mirrors playwright's API
+            timeout_error = PatchrightTimeoutError  # type: ignore[assignment]
 
         for attempt in range(1, self.MAX_LAUNCH_RETRIES + 1):
             try:
-                self.browser = self.playwright.chromium.launch(headless=self.headless, timeout=30_000)
+                self.browser = self.playwright.chromium.launch(headless=self.headless, timeout=30_000)  # type: ignore[assignment]
                 self.page = self.browser.new_page()
-                Stealth().apply_stealth_sync(self.page)
+                if self.setup == "stock":
+                    Stealth().apply_stealth_sync(self.page)
                 self.page.goto(self.url, timeout=30_000)
                 self.logger.info(f"Launched browser and navigated to {self.url}")
                 return
-            except PlaywrightTimeoutError as e:
+            except timeout_error as e:
                 self.logger.warning(f"Launch attempt {attempt} failed: {e}")
                 if self.browser:
                     self.browser.close()
