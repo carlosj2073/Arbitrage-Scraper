@@ -1,3 +1,7 @@
 {
-    "ruff.importStrategy": "fromEnvironment"
+    "ruff.importStrategy": "fromEnvironment",
+    "files.exclude": {
+        "**/.mypy_cache": true,
+        "**/.ruff_cache": true
+    }
 }

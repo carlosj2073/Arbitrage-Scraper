@@ -5,9 +5,11 @@ from decimal import Decimal
 from types import TracebackType
 from typing import Literal, Self
 
+from patchright.sync_api import Error as PatchrightError
 from patchright.sync_api import TimeoutError as PatchrightTimeoutError
 from patchright.sync_api import sync_playwright as patchright_sync_playwright
-from playwright.sync_api import Browser, Page, Playwright
+from playwright.sync_api import Browser, Locator, Page, Playwright
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright as stock_sync_playwright
 from playwright_stealth import Stealth
@@ -16,11 +18,12 @@ from scraper.logger import get_logger
 
 
 class BestBuyScraper:
+    """Scraper for Best Buy website. Handles launching the browser, navigating to the page, scrolling to load all products, and extracting product data."""
     website = "bestbuy"
     MAX_LAUNCH_RETRIES = 3
 
 
-    def __init__(self, url: str, logger: logging.Logger, setup: Literal["stock", "patchright"] = "stock", headless: bool = False) -> None:
+    def __init__(self, url: str, logger: logging.Logger, setup: Literal["stock", "patchright"] = "patchright", headless: bool = False) -> None:
         self.url = url
         self.logger = logger
         self.setup = setup
@@ -48,7 +51,7 @@ class BestBuyScraper:
         """Starts Playwright and navigates to url with retry logic on transient failures."""
         self.logger.info (f"Initiating playwright and launching {self.website}.com")
 
-        # Determines the setup 
+        # Adjusts setup based on chosen configurations (stock vs patchright)
         if self.setup == "stock" :
             self.playwright = stock_sync_playwright().start()
             timeout_error = PlaywrightTimeoutError
@@ -58,10 +61,14 @@ class BestBuyScraper:
 
         for attempt in range(1, self.MAX_LAUNCH_RETRIES + 1):
             try:
-                self.browser = self.playwright.chromium.launch(headless=self.headless, timeout=30_000)  # type: ignore[assignment]
+                assert self.playwright is not None
+                self.browser = self.playwright.chromium.launch(headless=self.headless, timeout=30_000)
                 self.page = self.browser.new_page()
+
+                # Applies stealth for stock only to avoid Akamai stealth detection when using patchright
                 if self.setup == "stock":
                     Stealth().apply_stealth_sync(self.page)
+
                 self.page.goto(self.url, timeout=30_000)
                 self.logger.info(f"Launched browser and navigated to {self.url}")
                 return
@@ -93,40 +100,67 @@ class BestBuyScraper:
         assert self.page is not None
         results = []
         seen_pids = set() # used for deduplication step
+        duplicates = 0
+        failed = 0
 
-        self.page.wait_for_selector('[data-product-id]')
+        self.page.wait_for_selector('[data-product-id]', timeout=30_000)
         self.scroll()
 
         cards = self.page.locator('[data-product-id]').all()
         self.logger.info(f"Found {len(cards)} product cards")
-        
+
+        # Allows for timeout control per subsequent field
+        self.page.set_default_timeout(10_000)
+
         for card in cards:
             try:
+                card.scroll_into_view_if_needed() # ensures card is visible (trial) 
                 website_pid = card.get_attribute('data-product-id')
+                
                 if website_pid in seen_pids:
+                    duplicates += 1
                     self.logger.warning(f"Skipping repeated card: website_pid = {website_pid}")
                     continue
-                listing = card.locator('.product-title').inner_text()
-                price_raw = card.locator('[data-testid="price-block-customer-price"]').nth(0).inner_text() 
-                url = card.locator('.product-list-item-link').get_attribute('href')
-                image = card.locator(' [data-testid="product-image"]').get_attribute('src')
 
-                seen_pids.add(website_pid)
-                results.append({
-                    "listing" : listing,
-                    "price_usd" : self.parse_price(price_raw),
-                    "website_pid" : website_pid,
-                    "url" : url,
-                    "image" : image,
-                    "brand" : None
-
-                })
+                results.append(self.extract_card(card, website_pid))
+                seen_pids.add(website_pid) # must run after extract_card() to allow duplicates to cover raised skipped cards as a backup.
 
             except Exception:
-                self.logger.exception("Skipping card due to error")
-        return results
+                failed += 1
+                try:
+                    ctext = card.inner_text()[:150]
+                except (PlaywrightError, PatchrightError):
+                    ctext = "<unreadable>"
+                self.logger.exception(f"Skipping card due to error\nCard text: {ctext}")
 
+        self.logger.info(f"Scrape Summary:\n\tscraped = {len(results)}, failed = {failed}, duplicates = {duplicates}")
+        return results
     
+    def extract_card(self, card: Locator, website_pid: str | None) -> dict:
+        """Extracts product information from a single card."""
+        listing = card.locator('.product-title').inner_text() # gives first card read a higher chance to load
+        price_raw = card.locator('[data-testid="price-block-customer-price"]').nth(0).inner_text() 
+        url = card.locator('.product-list-item-link').get_attribute('href')
+        image = card.locator(' [data-testid="product-image"]').get_attribute('src')
+
+        price_usd = self.parse_price(price_raw)
+        
+        return {
+            "listing" : listing,
+            "price_usd" : price_usd,
+            "website_pid" : website_pid,
+            "url" : url,
+            "image" : image,
+            "brand" : self.parse_brand(listing)
+        }
+
+
+    @staticmethod
+    def parse_brand(listing: str) -> str | None:
+        "Parses brand name from listing string"
+        brand, sep, _ = listing.partition(" - ")
+        return brand.strip() if sep else None
+        
     @staticmethod
     def parse_price(price_raw: str) -> Decimal:
         "formats and converts a price string to Decimal"
@@ -140,7 +174,7 @@ if __name__ == "__main__":
     url = "https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&st=headphones"
     logger = get_logger("bestbuy")
 
-    with BestBuyScraper(url=url, logger=logger) as scraper:
+    with BestBuyScraper(url=url, logger=logger, headless=False) as scraper:
         results = scraper.scrape()
 
     for result in results:
